@@ -1,0 +1,5 @@
+syntax="proto3";
+
+message C2GS_AppClose{
+	int32 playerId = 1;
+}

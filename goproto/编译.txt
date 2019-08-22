@@ -1,0 +1,1 @@
+ Get-ChildItem proto/*.proto |Resolve-Path -Relative | %{protoc $_ --go_out=.}

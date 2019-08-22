@@ -1,0 +1,16 @@
+syntax="proto3";
+
+
+message C2GS_Operation{
+	 repeated int32 opcodes=1;
+	 int32 currentFrame=2;
+	 int32 playerId = 3;
+	 repeated float movement = 4;
+	 
+}
+message GS2C_Operation{
+	repeated C2GS_Operation operations=1;
+	int32 serverFrame=2;
+}
+
+

@@ -1,0 +1,103 @@
+syntax="proto3";
+
+//status 0：未在房间中
+//1：未就绪
+//2：已准备
+//3：选好英雄
+//4：游戏进行中
+message Player{
+	int32 playerId = 1;
+	string playName = 2;
+	int32 playerStatus = 3;
+}
+
+message Room{
+	int32 roomId = 1;
+	repeated Player players = 2;
+}
+
+//房间列表获取,只发送给请求客户端
+message C2GS_RoomGet {
+	
+}
+
+message GS2C_RoomGet {
+	repeated Room rooms = 1;
+}
+
+//房间创建，只发送给请求客户端
+message C2GS_RoomCrt {
+	Player roomOwner= 1;
+}
+
+message GS2C_RoomCrt {
+	int32 resStatus = 1;
+	int32 roomId =2;
+}
+
+//加入房间
+//加入成功给房间内所有客户端发送消息，消息包括
+//加入失败则给请求客户端发送？？
+message C2GS_RoomJoin {
+	int32 roomId = 1;
+	int32 playerId = 2;
+}
+
+message GS2C_RoomJoin {
+	int32 resStatus = 1;
+	Room roomInfo = 2;
+}
+
+//退出房间
+message C2GS_RoomQuit {
+	int32 roomId =1;
+	int32 playerId = 2;
+}
+
+message GS2C_RoomQuit {
+	int32 resStatus = 1;
+	int32 playerId = 2;
+}
+
+//玩家准备
+message C2GS_PlayerReady {
+	int32 playerId = 1;
+	int32 roomId = 2;
+}
+
+message GS2C_PlayerReady {
+	int32 resStatus = 1;
+	int32 playerId = 2;
+}
+
+
+//进入选择
+message C2GS_StartChoose {
+	int32 roomId = 1;
+	int32 playerId = 2;
+}
+
+message GS2C_StartChoose {
+	int32 ltype = 1;
+	int32 roomId = 2;
+	int32 playerId = 3;
+}
+
+//英雄选择
+message C2GS_ChooseLegend {
+	int32 ltype = 1;
+	int32 roomId = 2;
+	int32 playerId = 3;
+}
+
+message GS2C_ChooseLegend {
+	int32 resStatus = 1;
+	int32 ltype = 2;
+	int32 playerId = 3;
+}
+
+
+//开始游戏
+message GS2C_GameStart {
+	int32 roomId = 1;
+}

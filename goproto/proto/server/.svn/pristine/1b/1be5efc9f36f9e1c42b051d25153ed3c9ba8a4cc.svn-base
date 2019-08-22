@@ -1,0 +1,6 @@
+syntax="proto3";
+
+//退出应用，假如客户端在房间内回复退出房间消息
+message C2GS_AppClose{
+	int32 playerId = 1;
+}

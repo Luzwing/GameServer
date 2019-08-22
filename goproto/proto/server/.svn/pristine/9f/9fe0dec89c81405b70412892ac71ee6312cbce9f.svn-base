@@ -1,0 +1,11 @@
+syntax="proto3";
+
+//进入游戏时向服务器发送客户端信息
+message C2GS_GameEnter {
+	int32 playerId = 1;
+	string playerName = 2;
+}
+
+message GS2C_GameEnter {
+	int32 resStatus = 1;
+}

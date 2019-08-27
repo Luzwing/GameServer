@@ -110,9 +110,6 @@ func Process(conn net.Conn) error {
 		//快速加入
 		case messageType.C_QUICKJOIN:
 			quickJoin(msgContent, conn)
-		default:
-			var flush []byte
-			conn.Read(flush)
 		}
 	}
 
@@ -129,13 +126,17 @@ func playerEnterGame(msgContent []byte, conn net.Conn) {
 		conn.Read(flush)
 	}
 
-	//若该玩家ID已存在且该玩家没有在房间中，则先从队列中删除，后续加锁
+	//若该玩家ID已存在且该玩家没有在房间中，则先从队列中删除，后续加
 	PlayersArrMutex.Lock()
 	defer PlayersArrMutex.Unlock()
+	// for pi, p := range playersArr {
+	// 	if reflect.DeepEqual(p.conn,conn) &&
+	// }
 
 	playerIdLock.Lock()
 	defer playerIdLock.Unlock()
-	newPlayer := Player{
+	newPlayer := new(Player)
+	(*newPlayer) = Player{
 		conn:       conn,
 		playerId:   PlayerId,
 		playerName: msgUnmarshalled.GetPlayerName(),
@@ -144,18 +145,17 @@ func playerEnterGame(msgContent []byte, conn net.Conn) {
 	}
 	PlayerId++
 
-	fmt.Println(newPlayer)
-
-	temp := new(Player)
-	temp = &newPlayer
-	//playersArr = append(playersArr, newPlayer)
-	playersArr = append(playersArr, temp)
+	playersArr = append(playersArr, newPlayer)
 
 	msg2Marshal := &gameEnter.GS2C_GameEnter{
 		ResStatus: 100,
 		PlayerId:  newPlayer.playerId,
 	}
-	msgContent2Send, _ := proto.Marshal(msg2Marshal)
+	msgContent2Send, me := proto.Marshal(msg2Marshal)
+	if me != nil {
+		Slog.Log2filef("获取房间序列化失败%s", me.Error())
+		return
+	}
 	msg2Send := TC_Combine(messageType.S_GAMEENTER, msgContent2Send)
 	_, e := sendMsg2One(conn, msg2Send)
 	if e != nil {
@@ -179,7 +179,7 @@ func getAllRoom(msgContent []byte, conn net.Conn) {
 	roomsToDisplayNum := 0
 	for i := 0; i < len(rooms); i++ {
 		//房间信息初始化
-		if rooms[i].isReady || rooms[i].isGameInProgress {
+		if rooms[i].isReady || rooms[i].isGameInProgress || !checkRoomStatus(rooms[i]) {
 			continue
 		}
 		roomsToDisplayNum++
@@ -206,9 +206,16 @@ func getAllRoom(msgContent []byte, conn net.Conn) {
 		k++
 	}
 	//消息序列化
-	msgContent2Send, _ := proto.Marshal(msg2Marshal)
+	msgContent2Send, me := proto.Marshal(msg2Marshal)
+	if me != nil {
+		Slog.Log2filef("获取房间序列化失败%s", me.Error())
+		return
+	}
 	msg2Send := TC_Combine(messageType.S_ROOMGET, msgContent2Send)
-	sendMsg2One(conn, msg2Send)
+	_, e := sendMsg2One(conn, msg2Send)
+	if e != nil {
+		Slog.Log2filef("获取房间发送失败%s", e.Error())
+	}
 }
 
 //为用户创建房间，并告知其房间信息
@@ -228,7 +235,7 @@ func crtRoom(msgContent []byte, conn net.Conn) {
 	// 	msgUnmarshalled.GetRoomOwner().GetPlayerId(),
 	// 	msgUnmarshalled.GetRoomOwner().GetPlayName(),
 	// }
-	var roomCrtor *Player
+	roomCrtor := &Player{}
 
 	//从维护的玩家队列中找到该玩家信息
 	PlayersArrMutex.RLock()
@@ -240,16 +247,17 @@ func crtRoom(msgContent []byte, conn net.Conn) {
 	}
 	PlayersArrMutex.RUnlock()
 
-	var newRoom GameRoom
-	if roomCrtor != nil {
-		newRoom = crtRoomByPlayer(roomCrtor)
+	newRoom := new(GameRoom)
+	if (*roomCrtor) != (Player{}) {
+		(*newRoom) = crtRoomByPlayer(roomCrtor)
 		isCrted = true
+
 	}
 
 	//加锁
 	RoomsMutex.Lock()
 	pointer2NewRoom := new(GameRoom)
-	pointer2NewRoom = &newRoom
+	pointer2NewRoom = newRoom
 	rooms = append(rooms, pointer2NewRoom)
 	//pointer2NewRoom := &rooms[len(rooms)-1]
 	RoomsMutex.Unlock()
@@ -274,6 +282,7 @@ func crtRoom(msgContent []byte, conn net.Conn) {
 
 //用户加入房间处理
 func joinRoom(msgContent []byte, conn net.Conn) {
+	ableJoin := false
 	var isJoined bool = false
 	msgUnmarshalled := &roomMessage.C2GS_RoomJoin{}
 	ume := proto.Unmarshal(msgContent, msgUnmarshalled)
@@ -306,6 +315,20 @@ func joinRoom(msgContent []byte, conn net.Conn) {
 				msg2Marshal.ResStatus = 301
 				break
 			}
+			//验证该房间进程是否还在,向
+			ComInterGorout <- notice.Notice{
+				NoticeType: notice.ClientWillJoin,
+				RoomId:     rid,
+				PlayerId:   pid,
+				IsAbleJoin: &ableJoin,
+			}
+			time.Sleep(50)
+			fmt.Println(ableJoin)
+			if !ableJoin {
+				msg2Marshal.ResStatus = 301
+				break
+			}
+
 			for index, playerJoin := range playersArr {
 				if pid == playerJoin.playerId {
 					//改变客户端信息
@@ -371,6 +394,7 @@ func joinRoom(msgContent []byte, conn net.Conn) {
 
 func quickJoin(msgContent []byte, conn net.Conn) {
 	fmt.Println("快速加入")
+	ableJoin := false
 	quickJoinMsgRcv := &roomMessage.C2GS_QuickJoin{}
 	ume := proto.Unmarshal(msgContent, quickJoinMsgRcv)
 	if ume != nil {
@@ -399,10 +423,10 @@ func quickJoin(msgContent []byte, conn net.Conn) {
 	//首先尝试加入一个队伍，遍历房间找出房间人最多的但又不超过的第一个房间
 	i, j := 1, 0
 	for ; i < len(rooms); i++ {
-		if len(rooms[i].players) <= len(rooms[j].players) {
+		if !(len(rooms[i].players) < STANDARD_PLAYER_IN_ROOM) || rooms[i].isReady || rooms[i].isGameInProgress || !checkRoomStatus(rooms[i]) {
 			continue
 		}
-		if (len(rooms[i].players) < STANDARD_PLAYER_IN_ROOM) && !rooms[i].isReady && !rooms[i].isGameInProgress && checkRoomStatus(rooms[i]) {
+		if len(rooms[i].players) <= len(rooms[j].players) {
 			j = i
 		}
 	}
@@ -415,15 +439,26 @@ func quickJoin(msgContent []byte, conn net.Conn) {
 		if (len(rooms[j].players) < STANDARD_PLAYER_IN_ROOM) && !rooms[j].isReady && !rooms[j].isGameInProgress && checkRoomStatus(rooms[j]) {
 			rooms[j].playersMutex.Lock()
 			if len(rooms[j].players) < STANDARD_PLAYER_IN_ROOM {
-				player2QuickJoin.status = playerstatus.NotReady
-				player2QuickJoin.roomId = rooms[j].roomId
-				rooms[j].players = append(rooms[j].players, player2QuickJoin)
-				isJoined = true
-				//向管道中写入信息，通知房间处理线程有客户端加入
+				//验证该房间进程是否还在,向
 				ComInterGorout <- notice.Notice{
-					NoticeType: notice.ClientJoin,
+					NoticeType: notice.ClientWillJoin,
 					RoomId:     rooms[j].roomId,
 					PlayerId:   pid,
+					IsAbleJoin: &ableJoin,
+				}
+				time.Sleep(50)
+				fmt.Println(ableJoin)
+				if ableJoin {
+					player2QuickJoin.status = playerstatus.NotReady
+					player2QuickJoin.roomId = rooms[j].roomId
+					rooms[j].players = append(rooms[j].players, player2QuickJoin)
+					isJoined = true
+					//向管道中写入信息，通知房间处理线程有客户端加入
+					ComInterGorout <- notice.Notice{
+						NoticeType: notice.ClientJoin,
+						RoomId:     rooms[j].roomId,
+						PlayerId:   pid,
+					}
 				}
 			}
 			rooms[j].playersMutex.Unlock()
@@ -492,6 +527,7 @@ func crtRoomByPlayer(roomOwner *Player) (gr GameRoom) {
 		isReady:          false,
 		allMsg:           map[*Player][][]byte{},
 		currentFrame:     0,
+		supplingFrame:    false,
 		playerRole:       map[*Player]byte{},
 		msgMutex:         new(sync.RWMutex),
 		playersMutex:     new(sync.RWMutex),

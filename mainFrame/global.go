@@ -34,7 +34,7 @@ var Slog serverlog.ServerLog
 var ComInterGorout chan notice.Notice
 var ComInterMutex sync.RWMutex
 
-const STANDARD_PLAYER_IN_ROOM = 2
+const STANDARD_PLAYER_IN_ROOM = 3
 
 //用户生成房间id
 var UniqueId int32
@@ -43,6 +43,8 @@ var idLock sync.Mutex
 //用户ID生成
 var PlayerId int32
 var playerIdLock sync.Mutex
+
+//代表
 
 //锁
 
@@ -74,6 +76,7 @@ type GameRoom struct {
 	msgCom           chan InnerGameNotice
 	allMsg           map[*Player][][]byte
 	currentFrame     int32
+	supplingFrame    bool
 	playerRole       map[*Player]byte
 	gameTimer        *time.Ticker
 	msgMutex         *sync.RWMutex

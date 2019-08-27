@@ -1,0 +1,36 @@
+syntax="proto3";
+
+
+message C2GS_Operation{
+	 repeated int32 opcodes=1;
+	 int32 currentFrame=2;
+	 int32 playerId = 3;
+	 repeated float movement = 4;
+	 
+}
+message GS2C_Operation{
+	repeated C2GS_Operation operations=1;
+	int32 serverFrame=2;
+	bool sevenNote=3;
+	int32 allFrame=4;
+}
+
+//游戏中死亡退出
+message C2GS_PlayerQuit{
+	int32 roomId = 1;
+	int32 playerId = 2;
+}
+
+//游戏结束
+message C2GS_GameEnd{
+	int32 roomId=1;
+}
+
+//补帧
+message C2GS_SuppleFrame{
+}
+
+message GS2C_SuppleFrame{
+}
+
+

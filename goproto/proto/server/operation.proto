@@ -12,6 +12,7 @@ message GS2C_Operation{
 	repeated C2GS_Operation operations=1;
 	int32 serverFrame=2;
 	bool sevenNote=3;
+	int32 allFrame=4;
 }
 
 //游戏中死亡退出

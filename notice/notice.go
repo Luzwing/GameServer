@@ -6,6 +6,7 @@ import (
 
 const (
 	_ byte = iota
+	ClientWillJoin
 	ClientJoin
 	GameStart
 	RoomDismiss
@@ -19,6 +20,7 @@ type Notice struct {
 	NoticeType byte
 	RoomId     int32
 	PlayerId   int32
+	IsAbleJoin *bool
 }
 
 func TimeOut(duration time.Duration, ch chan int) {

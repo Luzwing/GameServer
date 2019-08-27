@@ -54,6 +54,9 @@ type sss struct {
 var tb []*int
 
 func main() {
+	var test *int
+	fmt.Println(test)
+	fmt.Println(test == nil)
 	fmt.Println(time.Now().UnixNano() / 1e6)
 	b := make([]*int, 10)
 	for iiii := 0; iiii < 10; iiii++ {

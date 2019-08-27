@@ -1,0 +1,26 @@
+operationMsg := &operation.GS2C_Operation{}
+				if len(gr.message) != 0 {
+					gr.frameMutex.Lock()
+					operationMsg.ServerFrame = gr.currentFrame
+					gr.currentFrame++
+					gr.frameMutex.Unlock()
+					gr.msgMutex.Lock()
+					//取出消息
+					for _, msg := range gr.message {
+						operationMsg.Operations = append(operationMsg.Operations, msg)
+					}
+					//清空message
+					gr.message = append([]*operation.C2GS_Operation{})
+
+					gr.msgMutex.Unlock()
+					//序列化
+					msg2Send, gameMarerr := proto.Marshal(operationMsg)
+					if gameMarerr != nil {
+						Slog.Log2filef("游戏操作消息序列化失败：%s", gameMarerr.Error())
+						continue
+					}
+					//添加消息类型
+					msg2Send = TC_Combine(messageType.S_OPERATION, msg2Send)
+					//发送
+					gr.sendMsg2AllInThisRoom(msg2Send)
+				}

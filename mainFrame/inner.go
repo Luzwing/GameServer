@@ -32,13 +32,21 @@ func (gr *GameRoom) roomGameServerStart() {
 				select {
 				case noticeMsg := <-ComInterGorout:
 					fmt.Println(noticeMsg.PlayerId, noticeMsg.RoomId, noticeMsg.NoticeType)
-
+					//若有玩家试图加入，如果该线程处于活跃状态则可以加入
+					if noticeMsg.NoticeType == notice.ClientWillJoin {
+						fmt.Println("有玩家试图加入", noticeMsg.PlayerId, noticeMsg.RoomId, noticeMsg.NoticeType)
+						//若有玩家加入本房间，则为其开创新协程
+						if noticeMsg.RoomId == gr.roomId {
+							if noticeMsg.IsAbleJoin != nil {
+								//if reflect.ValueOf(*noticeMsg.IsAbleJoin).IsValid() {
+								(*noticeMsg.IsAbleJoin) = true
+								//}
+							}
+						}
+					}
 					//如果有玩家加入某一个房间
 					if noticeMsg.NoticeType == notice.ClientJoin {
 						fmt.Println("有玩家加入", noticeMsg.PlayerId, noticeMsg.RoomId, noticeMsg.NoticeType)
-						for _, p := range gr.players {
-							fmt.Println(*p)
-						}
 						//若有玩家加入本房间，则为其开创新协程
 						if noticeMsg.RoomId == gr.roomId {
 							for i := 0; i < len(gr.players); i++ {
@@ -114,9 +122,19 @@ func (gr *GameRoom) roomGameServerStart() {
 		} else { //游戏进行中逻辑
 			fmt.Println("开始发游戏消息")
 			ticker := time.NewTicker(time.Millisecond * 50)
+			//frameToSuppleNum := 0
+			//initialRcv := false
 			for {
 				<-ticker.C
 				//从消息队列中取出消息，发给客户端,加锁
+				// if gr.supplingFrame {
+				// 	if frameToSuppleNum < 3 {
+				// 		frameToSuppleNum++
+				// 		continue
+				// 	}
+				// 	frameToSuppleNum = 0
+				// 	gr.supplingFrame = false
+				// }
 				if len(gr.emptyMsg) != 0 {
 					gr.emptyMutex.Lock()
 					suppleFrameMsgSnd := &operation.GS2C_SuppleFrame{}
@@ -132,8 +150,10 @@ func (gr *GameRoom) roomGameServerStart() {
 					msg2Send = TC_Combine(messageType.S_SUPPLEFRAME, msg2Send)
 					//发送
 					gr.sendMsg2AllInThisRoom(msg2Send)
-					continue
 				}
+				// if len(gr.message) != 0 {
+				// 	initialRcv = true
+				// }
 
 				if len(gr.message) != 0 {
 					operationMsg := &operation.GS2C_Operation{}
@@ -148,7 +168,6 @@ func (gr *GameRoom) roomGameServerStart() {
 					}
 					//清空message
 					gr.message = append([]*operation.C2GS_Operation{})
-
 					gr.msgMutex.Unlock()
 					//序列化
 					msg2Send, gameMarerr := proto.Marshal(operationMsg)
@@ -161,7 +180,9 @@ func (gr *GameRoom) roomGameServerStart() {
 					//发送
 					gr.sendMsg2AllInThisRoom(msg2Send)
 
+					//operationSend := false
 				}
+
 			}
 			ticker.Stop()
 		}
@@ -298,6 +319,9 @@ func (gr *GameRoom) msgReceive(pplayer *Player) {
 				continue
 			//补帧请求
 			case messageType.C_SUPPLEFRAME:
+				// if !gr.supplingFrame {
+				// 	gr.supplingFrame = true
+				// }
 				suppleFrameMsg := &operation.C2GS_SuppleFrame{}
 				umerr := proto.Unmarshal(msgContent, suppleFrameMsg)
 				if umerr != nil {
@@ -640,18 +664,20 @@ func (gr *GameRoom) clientAppClose(msgContent []byte, pplayer *Player) {
 	}
 
 	//若房间未解散，向房间内所有用户发送有玩家退出消息
-	if !isRoomDismiss {
-		playerQuitMsg2Snd := &roomMessage.GS2C_RoomQuit{
-			ResStatus: 100,
-			PlayerId:  clientCloseMsgRcv.GetPlayerId(),
-		}
+	if !gr.isGameInProgress && !gr.isReady {
+		if !isRoomDismiss {
+			playerQuitMsg2Snd := &roomMessage.GS2C_RoomQuit{
+				ResStatus: 100,
+				PlayerId:  clientCloseMsgRcv.GetPlayerId(),
+			}
 
-		msg2Send, err := proto.Marshal(playerQuitMsg2Snd)
-		if err != nil {
-			Slog.Log2file(err.Error())
+			msg2Send, err := proto.Marshal(playerQuitMsg2Snd)
+			if err != nil {
+				Slog.Log2file(err.Error())
+			}
+			msg2Send = TC_Combine(messageType.S_ROOMQUIT, msg2Send)
+			gr.sendMsg2AllInThisRoom(msg2Send)
 		}
-		msg2Send = TC_Combine(messageType.S_ROOMQUIT, msg2Send)
-		gr.sendMsg2AllInThisRoom(msg2Send)
 	}
 
 	//关闭其连接

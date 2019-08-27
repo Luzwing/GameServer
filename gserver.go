@@ -9,6 +9,10 @@ import (
 	"runtime"
 )
 
+func no(conn net.Conn) net.Conn {
+	return conn
+}
+
 func main() {
 	//设置CPU多核数
 	runtime.GOMAXPROCS(runtime.NumCPU())

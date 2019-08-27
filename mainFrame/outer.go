@@ -20,10 +20,11 @@ import (
 
 func Process(conn net.Conn) error {
 	fmt.Println("进入房间外处理进程")
+	errCount := 0
 	for {
 		//读取消息长度
+		var msglen int32 = 0
 		var msgLenByte []byte
-		//msgLenByte := make([]byte, 4)
 		var lenLenHaveRead int32 = 0
 		for {
 			tempBuf := make([]byte, 4-lenLenHaveRead)
@@ -31,11 +32,17 @@ func Process(conn net.Conn) error {
 
 			if e != nil {
 				if e == io.EOF {
-					//runtime.Goexit()
-					break
+					Slog.Log2filef("Process Receive Failed,连接被关闭, err:", e.Error())
+					conn.Close()
+					runtime.Goexit()
 				}
-				Slog.Log2file(e.Error())
-				fmt.Println("Receive Failed, err:", e)
+				Slog.Log2filef("Process Receive Failed, err:%s", e.Error())
+				errCount++
+				if errCount >= 20 {
+					errCount = 0
+					conn.Close()
+					runtime.Goexit()
+				}
 			}
 			lenLenHaveRead += int32(lenByte)
 			msgLenByte = CombineBytes(msgLenByte, tempBuf)
@@ -43,13 +50,18 @@ func Process(conn net.Conn) error {
 				break
 			}
 		}
-		//fmt.Println(msgLenByte)
+		fmt.Println(msgLenByte)
 
-		msglen := BytesToInt(msgLenByte)
-		fmt.Println("消息长度：", msglen)
+		msglen = BytesToInt(msgLenByte)
+		Slog.Log2filef("消息长度：%d", msglen)
+
+		if msglen < 1 || msglen > 128 {
+			var flush []byte
+			conn.Read(flush)
+			continue
+		}
 
 		var buf []byte
-		//buf := make([]byte, msglen)
 		//已经读到的字节数
 		var protoLenHaveRead int32 = 0
 		for {
@@ -58,17 +70,22 @@ func Process(conn net.Conn) error {
 
 			if err != nil {
 				if err == io.EOF {
-					//runtime.Goexit()
-					break
+					Slog.Log2filef("Process Receive Failed,连接被关闭, err:", err.Error())
+					conn.Close()
+					runtime.Goexit()
 				}
-				Slog.Log2file(err.Error())
-				fmt.Println("Receive Failed, err:", err)
+				errCount++
+				Slog.Log2filef("Process Receive Failed, err:%s", err.Error())
 			}
 			protoLenHaveRead += int32(protoLen)
 			buf = CombineBytes(buf, tempBuf)
 			if protoLenHaveRead == msglen {
 				break
 			}
+		}
+
+		if len(buf) < 1 || len(buf) > 128 {
+			continue
 		}
 
 		msgType := buf[0]
@@ -89,7 +106,7 @@ func Process(conn net.Conn) error {
 			joinRoom(msgContent, conn)
 		//有客户端强制退出
 		case messageType.C_APPCLOSE:
-			appCloseOuterRoom(msgContent)
+			appCloseOuterRoom(msgContent, conn)
 		//快速加入
 		case messageType.C_QUICKJOIN:
 			quickJoin(msgContent, conn)
@@ -104,34 +121,40 @@ func Process(conn net.Conn) error {
 
 func playerEnterGame(msgContent []byte, conn net.Conn) {
 	msgUnmarshalled := &gameEnter.C2GS_GameEnter{}
-	proto.Unmarshal(msgContent, msgUnmarshalled)
+	ume := proto.Unmarshal(msgContent, msgUnmarshalled)
+	if ume != nil {
+		Slog.Log2filef("Select Unmarshal Error:%s\n", ume.Error())
+		//清空接受缓冲区
+		var flush []byte
+		conn.Read(flush)
+	}
 
 	//若该玩家ID已存在且该玩家没有在房间中，则先从队列中删除，后续加锁
 	PlayersArrMutex.Lock()
 	defer PlayersArrMutex.Unlock()
-	// for index, player := range playersArr {
-	// 	if (player.playerId == msgUnmarshalled.GetPlayerId()) && (player.playerName == msgUnmarshalled.GetPlayerName()) {
-	// 		// if player.status == playerstatus.NotInRoom {
-	// 		// 	playersArr = append(playersArr[:index], playersArr[index+1:]...)
-	// 		// 	player.conn.Close()
-	// 		// }
-	// 		//加锁
-	// 		playersArr = append(playersArr[:index], playersArr[index+1:]...)
-	// 		//player.conn.Close()
-	// 	}
-	// }
 
+	playerIdLock.Lock()
+	defer playerIdLock.Unlock()
 	newPlayer := Player{
 		conn:       conn,
-		playerId:   msgUnmarshalled.GetPlayerId(),
+		playerId:   PlayerId,
 		playerName: msgUnmarshalled.GetPlayerName(),
 		status:     playerstatus.NotInRoom,
 		roomId:     0,
 	}
-	playersArr = append(playersArr, newPlayer)
+	PlayerId++
 
-	msg2Marshal := &gameEnter.GS2C_GameEnter{}
-	msg2Marshal.ResStatus = 100
+	fmt.Println(newPlayer)
+
+	temp := new(Player)
+	temp = &newPlayer
+	//playersArr = append(playersArr, newPlayer)
+	playersArr = append(playersArr, temp)
+
+	msg2Marshal := &gameEnter.GS2C_GameEnter{
+		ResStatus: 100,
+		PlayerId:  newPlayer.playerId,
+	}
 	msgContent2Send, _ := proto.Marshal(msg2Marshal)
 	msg2Send := TC_Combine(messageType.S_GAMEENTER, msgContent2Send)
 	_, e := sendMsg2One(conn, msg2Send)
@@ -146,8 +169,8 @@ func playerEnterGame(msgContent []byte, conn net.Conn) {
 }
 
 func getAllRoom(msgContent []byte, conn net.Conn) {
-	msgUnmarshalled := &roomMessage.C2GS_RoomGet{}
-	proto.Unmarshal(msgContent, msgUnmarshalled)
+	// msgUnmarshalled := &roomMessage.C2GS_RoomGet{}
+	// proto.Unmarshal(msgContent, msgUnmarshalled)
 
 	//要发送给客户端的proto类
 	msg2Marshal := &roomMessage.GS2C_RoomGet{}
@@ -167,7 +190,7 @@ func getAllRoom(msgContent []byte, conn net.Conn) {
 	k := 0
 	for ; i < len(rooms); i++ {
 		//房间信息初始化
-		if rooms[i].isReady || rooms[i].isGameInProgress {
+		if rooms[i].isReady || rooms[i].isGameInProgress || !checkRoomStatus(rooms[i]) {
 			continue
 		}
 
@@ -190,8 +213,15 @@ func getAllRoom(msgContent []byte, conn net.Conn) {
 
 //为用户创建房间，并告知其房间信息
 func crtRoom(msgContent []byte, conn net.Conn) {
+	isCrted := false
 	msgUnmarshalled := &roomMessage.C2GS_RoomCrt{}
-	proto.Unmarshal(msgContent, msgUnmarshalled)
+	ume := proto.Unmarshal(msgContent, msgUnmarshalled)
+	if ume != nil {
+		Slog.Log2filef("Select Unmarshal Error:%s\n", ume.Error())
+		//清空接受缓冲区
+		var flush []byte
+		conn.Read(flush)
+	}
 
 	// roomCrtor := Player{
 	// 	&conn,
@@ -204,11 +234,17 @@ func crtRoom(msgContent []byte, conn net.Conn) {
 	PlayersArrMutex.RLock()
 	for i, p := range playersArr {
 		if p.playerId == msgUnmarshalled.GetRoomOwner().GetPlayerId() {
-			roomCrtor = &playersArr[i]
+			// roomCrtor = &playersArr[i]
+			roomCrtor = playersArr[i]
 		}
 	}
 	PlayersArrMutex.RUnlock()
-	newRoom := crtRoomByPlayer(roomCrtor)
+
+	var newRoom GameRoom
+	if roomCrtor != nil {
+		newRoom = crtRoomByPlayer(roomCrtor)
+		isCrted = true
+	}
 
 	//加锁
 	RoomsMutex.Lock()
@@ -219,10 +255,13 @@ func crtRoom(msgContent []byte, conn net.Conn) {
 	RoomsMutex.Unlock()
 
 	//要发送给客户端的proto类
-	msg2Marshal := &roomMessage.GS2C_RoomCrt{}
-	//
-	msg2Marshal.ResStatus = 100
-	msg2Marshal.RoomId = newRoom.roomId
+	msg2Marshal := &roomMessage.GS2C_RoomCrt{
+		ResStatus: 201,
+		RoomId:    newRoom.roomId,
+	}
+	if isCrted {
+		msg2Marshal.ResStatus = 100
+	}
 	//消息序列化
 	msgContent2Send, _ := proto.Marshal(msg2Marshal)
 	msg2Send := TC_Combine(messageType.S_ROOMCRT, msgContent2Send)
@@ -237,7 +276,13 @@ func crtRoom(msgContent []byte, conn net.Conn) {
 func joinRoom(msgContent []byte, conn net.Conn) {
 	var isJoined bool = false
 	msgUnmarshalled := &roomMessage.C2GS_RoomJoin{}
-	proto.Unmarshal(msgContent, msgUnmarshalled)
+	ume := proto.Unmarshal(msgContent, msgUnmarshalled)
+	if ume != nil {
+		Slog.Log2filef("Select Unmarshal Error:%s\n", ume.Error())
+		//清空接受缓冲区
+		var flush []byte
+		conn.Read(flush)
+	}
 
 	pid := msgUnmarshalled.GetPlayerId()
 	rid := msgUnmarshalled.GetRoomId()
@@ -252,7 +297,12 @@ func joinRoom(msgContent []byte, conn net.Conn) {
 	for subscript, groom := range rooms {
 		if groom.roomId == rid {
 			//若房间人数已满，则加入失败
-			if len(groom.players) == STANDARD_PLAYER_IN_ROOM {
+			if len(groom.players) >= STANDARD_PLAYER_IN_ROOM {
+				msg2Marshal.ResStatus = 301
+				break
+			}
+			//如果房间状态不正常，加入失败
+			if groom.isReady || groom.isGameInProgress || !checkRoomStatus(groom) {
 				msg2Marshal.ResStatus = 301
 				break
 			}
@@ -266,18 +316,13 @@ func joinRoom(msgContent []byte, conn net.Conn) {
 					if len(rooms[subscript].players) < STANDARD_PLAYER_IN_ROOM {
 						rooms[subscript].playersMutex.Lock()
 						if len(rooms[subscript].players) < STANDARD_PLAYER_IN_ROOM {
-							rooms[subscript].players = append(groom.players, &playersArr[index])
+							// rooms[subscript].players = append(groom.players, &playersArr[index])
+							rooms[subscript].players = append(groom.players, playersArr[index])
 							isJoined = true
 						}
 						rooms[subscript].playersMutex.Unlock()
 					}
 
-					//打印
-					for _, r := range rooms {
-						for _, p := range r.players {
-							fmt.Println(r.roomId, " ", *p)
-						}
-					}
 					//编辑回复消息
 					msg2Marshal.ResStatus = 100
 					msg2Marshal.RoomInfo = &roomMessage.Room{}
@@ -325,8 +370,15 @@ func joinRoom(msgContent []byte, conn net.Conn) {
 }
 
 func quickJoin(msgContent []byte, conn net.Conn) {
+	fmt.Println("快速加入")
 	quickJoinMsgRcv := &roomMessage.C2GS_QuickJoin{}
-	proto.Unmarshal(msgContent, quickJoinMsgRcv)
+	ume := proto.Unmarshal(msgContent, quickJoinMsgRcv)
+	if ume != nil {
+		Slog.Log2filef("Select Unmarshal Error:%s\n", ume.Error())
+		//清空接受缓冲区
+		var flush []byte
+		conn.Read(flush)
+	}
 	pid := quickJoinMsgRcv.GetPlayerId()
 
 	isJoined, isCrted := false, false
@@ -336,7 +388,8 @@ func quickJoin(msgContent []byte, conn net.Conn) {
 	PlayersArrMutex.RLock()
 	for pindex, player := range playersArr {
 		if pid == player.playerId {
-			player2QuickJoin = &playersArr[pindex]
+			// player2QuickJoin = &playersArr[pindex]
+			player2QuickJoin = playersArr[pindex]
 		}
 	}
 	PlayersArrMutex.RUnlock()
@@ -346,21 +399,32 @@ func quickJoin(msgContent []byte, conn net.Conn) {
 	//首先尝试加入一个队伍，遍历房间找出房间人最多的但又不超过的第一个房间
 	i, j := 1, 0
 	for ; i < len(rooms); i++ {
-		if len(rooms[i].players) > len(rooms[j].players) {
+		if len(rooms[i].players) <= len(rooms[j].players) {
+			continue
+		}
+		if (len(rooms[i].players) < STANDARD_PLAYER_IN_ROOM) && !rooms[i].isReady && !rooms[i].isGameInProgress && checkRoomStatus(rooms[i]) {
 			j = i
 		}
-		if len(rooms[j].players) == STANDARD_PLAYER_IN_ROOM-1 {
-			break
-		}
 	}
-
-	//如果房间数量不为0，则一定会加入房间
-	if len(rooms) > 0 {
-		if len(rooms[j].players) < STANDARD_PLAYER_IN_ROOM {
+	//尝试加入房间
+	if j < len(rooms) {
+		fmt.Println(len(rooms[j].players) < STANDARD_PLAYER_IN_ROOM)
+		fmt.Println(!rooms[j].isReady)
+		fmt.Println(!rooms[j].isGameInProgress)
+		fmt.Println(checkRoomStatus(rooms[j]))
+		if (len(rooms[j].players) < STANDARD_PLAYER_IN_ROOM) && !rooms[j].isReady && !rooms[j].isGameInProgress && checkRoomStatus(rooms[j]) {
 			rooms[j].playersMutex.Lock()
 			if len(rooms[j].players) < STANDARD_PLAYER_IN_ROOM {
+				player2QuickJoin.status = playerstatus.NotReady
+				player2QuickJoin.roomId = rooms[j].roomId
 				rooms[j].players = append(rooms[j].players, player2QuickJoin)
 				isJoined = true
+				//向管道中写入信息，通知房间处理线程有客户端加入
+				ComInterGorout <- notice.Notice{
+					NoticeType: notice.ClientJoin,
+					RoomId:     rooms[j].roomId,
+					PlayerId:   pid,
+				}
 			}
 			rooms[j].playersMutex.Unlock()
 		}
@@ -370,11 +434,8 @@ func quickJoin(msgContent []byte, conn net.Conn) {
 	pointer2NewRoom := new(GameRoom)
 	if !isJoined {
 		newRoom := crtRoomByPlayer(player2QuickJoin)
-		//加入rooms，加锁
-		RoomsMutex.Lock()
 		pointer2NewRoom = &newRoom
 		rooms = append(rooms, pointer2NewRoom)
-		RoomsMutex.Unlock()
 		isCrted = true
 	}
 
@@ -404,8 +465,10 @@ func quickJoin(msgContent []byte, conn net.Conn) {
 		sendMsg2AllInRoom(msgBytes, rooms[j].roomId)
 		//取锁
 		rooms[j].playersMutex.RUnlock()
+		runtime.Goexit()
 
 	} else if isCrted {
+		fmt.Println("创建了")
 		crtedMsg2Send := &roomMessage.GS2C_RoomCrt{
 			ResStatus: 100,
 			RoomId:    pointer2NewRoom.roomId,
@@ -414,6 +477,9 @@ func quickJoin(msgContent []byte, conn net.Conn) {
 		msgBytes = TC_Combine(messageType.S_ROOMCRT, msgBytes)
 		//发
 		sendMsg2One(conn, msgBytes)
+		//该客户端进入房间，关闭该线程，进入房间内逻辑线程
+		go pointer2NewRoom.roomGameServerStart()
+		runtime.Goexit()
 	}
 }
 
@@ -430,6 +496,8 @@ func crtRoomByPlayer(roomOwner *Player) (gr GameRoom) {
 		msgMutex:         new(sync.RWMutex),
 		playersMutex:     new(sync.RWMutex),
 		roleMutex:        new(sync.RWMutex),
+		emptyMutex:       new(sync.RWMutex),
+		frameMutex:       new(sync.RWMutex),
 	}
 	//gr.messages = make(chan *operation.C2GS_Operation, 32)
 	gr.msgCom = make(chan InnerGameNotice, 1)
@@ -440,9 +508,12 @@ func crtRoomByPlayer(roomOwner *Player) (gr GameRoom) {
 	return gr
 }
 
-func appCloseOuterRoom(msgContent []byte) {
+func appCloseOuterRoom(msgContent []byte, conn net.Conn) {
 	clientCloseMsgRcv := &appclose.C2GS_AppClose{}
-	proto.Unmarshal(msgContent, clientCloseMsgRcv)
+	ume := proto.Unmarshal(msgContent, clientCloseMsgRcv)
+	if ume != nil {
+		Slog.Log2filef("AppClose Unmarshal Error:%s\n", ume.Error())
+	}
 
 	//将其从playersArr中移出，加锁
 	PlayersArrMutex.Lock()
@@ -454,13 +525,7 @@ func appCloseOuterRoom(msgContent []byte) {
 			break
 		}
 	}
-
-	fmt.Printf("目前还剩%d位玩家在线\n", len(playersArr))
-	for i, p := range playersArr {
-		fmt.Printf("第%d位用户\n:", i)
-		fmt.Println("具体信息:", p)
-	}
-
+	conn.Close()
 	runtime.Goexit()
 }
 
@@ -469,4 +534,29 @@ func generateUniqueId() int32 {
 	UniqueId++
 	idLock.Unlock()
 	return UniqueId
+}
+
+//如果房间中的所有玩家ID可以在玩家队列中找到
+//并且房间ID与其相同
+//则房间状态正常
+func checkRoomStatus(room *GameRoom) bool {
+	normalCount := 0
+	PlayersArrMutex.RLock()
+	room.playersMutex.RLock()
+	defer PlayersArrMutex.RUnlock()
+	defer room.playersMutex.RUnlock()
+	for _, playerInRoom := range room.players {
+		if (playerInRoom.status != playerstatus.IsReady) && (playerInRoom.status != playerstatus.NotReady) {
+			continue
+		}
+		for _, player := range playersArr {
+			if (playerInRoom.playerId == player.playerId) && (room.roomId == player.roomId) {
+				normalCount++
+			}
+		}
+	}
+	if normalCount == len(room.players) {
+		return true
+	}
+	return false
 }

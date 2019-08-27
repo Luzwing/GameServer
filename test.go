@@ -54,8 +54,19 @@ type sss struct {
 var tb []*int
 
 func main() {
-	a()
-	b()
+	fmt.Println(time.Now().UnixNano() / 1e6)
+	b := make([]*int, 10)
+	for iiii := 0; iiii < 10; iiii++ {
+		hh := iiii
+		b[iiii] = &hh
+	}
+	a := &b[3]
+	for iiii := 0; iiii < 10; iiii++ {
+		fmt.Println(*b[iiii])
+	}
+	b = append(b[:1], b[2:]...)
+	fmt.Println(b)
+	fmt.Println(*a)
 }
 
 func a() {

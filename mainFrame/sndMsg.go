@@ -54,5 +54,8 @@ func sendMsg2AllInRoom(msg []byte, roomId int32) {
 
 func sendMsg2One(clientConn net.Conn, msg []byte) (n int, e error) {
 	n, e = clientConn.Write(msg)
+	if e != nil {
+		Slog.Log2filef("Send err:%s\n", e.Error())
+	}
 	return n, e
 }

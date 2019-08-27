@@ -3,9 +3,11 @@ package mainFrame
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"goproto/operation"
 	"net"
 	"notice"
+	"playerstatus"
 	"serverlog"
 	"sync"
 	"time"
@@ -14,7 +16,8 @@ import (
 var conns []net.Conn
 
 //所有玩家列表
-var playersArr []Player
+// var playersArr []Player
+var playersArr []*Player
 var PlayersArrMutex sync.RWMutex
 
 //所有房间列表
@@ -36,6 +39,10 @@ const STANDARD_PLAYER_IN_ROOM = 2
 //用户生成房间id
 var UniqueId int32
 var idLock sync.Mutex
+
+//用户ID生成
+var PlayerId int32
+var playerIdLock sync.Mutex
 
 //锁
 
@@ -63,7 +70,7 @@ type GameRoom struct {
 	isGameInProgress bool
 	isReady          bool //用于在玩家退出时判断其是否可以退出
 	message          []*operation.C2GS_Operation
-	messages         chan *operation.C2GS_Operation
+	emptyMsg         []*operation.C2GS_SuppleFrame
 	msgCom           chan InnerGameNotice
 	allMsg           map[*Player][][]byte
 	currentFrame     int32
@@ -72,6 +79,8 @@ type GameRoom struct {
 	msgMutex         *sync.RWMutex
 	playersMutex     *sync.RWMutex
 	roleMutex        *sync.RWMutex
+	emptyMutex       *sync.RWMutex
+	frameMutex       *sync.RWMutex
 }
 
 func Close() {
@@ -101,6 +110,82 @@ func Int32ToBytes(i int32) []byte {
 	var buf []byte = make([]byte, 4)
 	binary.LittleEndian.PutUint32(buf, uint32(i))
 	return buf
+}
+
+func GetAllRooms() {
+	RoomsMutex.RLock()
+	defer RoomsMutex.RUnlock()
+	for rindex, room := range rooms {
+		fmt.Printf("房间%d:\n", rindex+1)
+		fmt.Printf("房间ID：%d\n", room.roomId)
+		fmt.Printf("房间玩家：\n")
+		room.playersMutex.RLock()
+		for pindex, player := range room.players {
+			fmt.Printf("玩家%d:\n", pindex+1)
+			fmt.Printf("玩家ID：%d\n", player.playerId)
+			fmt.Printf("玩家姓名:%s\n", player.playerName)
+		}
+		room.playersMutex.RUnlock()
+	}
+}
+
+func GetAllPlayers() {
+	PlayersArrMutex.RLock()
+	defer PlayersArrMutex.RUnlock()
+
+	for pindex, player := range playersArr {
+		fmt.Printf("玩家%d:\n", pindex+1)
+		fmt.Printf("玩家ID：%d\n", player.playerId)
+		fmt.Printf("玩家姓名:%s\n", player.playerName)
+		fmt.Printf("玩家房间号：%d\n", player.roomId)
+		fmt.Printf("玩家状态：%d\n", player.status)
+	}
+}
+
+func DeleteRoomById(rid int32) {
+	RoomsMutex.Lock()
+	PlayersArrMutex.Lock()
+	defer RoomsMutex.Unlock()
+	defer PlayersArrMutex.Unlock()
+	for _, room := range rooms {
+		if rid == room.roomId {
+			room.playersMutex.Lock()
+			for _, player := range room.players {
+				player.roomId = 0
+				player.status = playerstatus.Deleted
+				player.conn.Close()
+				for pi, p := range playersArr {
+					if p.playerId == player.playerId {
+						playersArr = append(playersArr[:pi], playersArr[pi+1:]...)
+					}
+				}
+			}
+			room.playersMutex.Unlock()
+			ComInterGorout <- notice.Notice{
+				NoticeType: notice.RoomDismiss,
+				RoomId:     rid,
+				PlayerId:   0,
+			}
+		}
+	}
+
+}
+
+func DeletePlayersById(pid int32) {
+	PlayersArrMutex.Lock()
+	defer PlayersArrMutex.Unlock()
+	for pindex, player := range playersArr {
+		if pid == player.playerId {
+			player.roomId = 0
+			player.status = playerstatus.Deleted
+
+			playersArr = append(playersArr[:pindex], playersArr[pindex+1:]...)
+
+			player.conn.Close()
+			fmt.Println("删除成功")
+		}
+	}
+
 }
 
 // func ClearSlice(s *[]interface{}) {

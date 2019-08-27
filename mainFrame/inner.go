@@ -9,7 +9,6 @@ import (
 	"math/rand"
 	"messageType"
 	"notice"
-	"os"
 	"playerstatus"
 	"runtime"
 	"time"
@@ -50,6 +49,21 @@ func (gr *GameRoom) roomGameServerStart() {
 								}
 							}
 							fmt.Println("房间内玩家人数：", len(gr.players))
+						}
+					}
+
+					if noticeMsg.NoticeType == notice.RoomDismiss {
+						if noticeMsg.RoomId == gr.roomId {
+							RoomsMutex.Lock()
+							defer RoomsMutex.Unlock()
+							for i := 0; i < len(rooms); i++ {
+								if rooms[i].roomId == gr.roomId {
+									rooms = append(rooms[:i], rooms[i+1:]...)
+									break
+								}
+							}
+							fmt.Println("房间数：", len(rooms))
+							runtime.Goexit()
 						}
 					}
 				case innerGameMsg := <-gr.msgCom:
@@ -102,12 +116,32 @@ func (gr *GameRoom) roomGameServerStart() {
 			ticker := time.NewTicker(time.Millisecond * 50)
 			for {
 				<-ticker.C
-				//从消息队列中取出消息，发给客户端,加读锁(因为只有一个取的线程，所以在if里面加锁)
+				//从消息队列中取出消息，发给客户端,加锁
+				if len(gr.emptyMsg) != 0 {
+					gr.emptyMutex.Lock()
+					suppleFrameMsgSnd := &operation.GS2C_SuppleFrame{}
+					msg2Send, gameMarerr := proto.Marshal(suppleFrameMsgSnd)
+					if gameMarerr != nil {
+						Slog.Log2filef("补帧操作序列化失败：%s", gameMarerr.Error())
+						continue
+					}
+					//清空
+					gr.emptyMsg = append([]*operation.C2GS_SuppleFrame{})
+					gr.emptyMutex.Unlock()
+					//添加消息类型
+					msg2Send = TC_Combine(messageType.S_SUPPLEFRAME, msg2Send)
+					//发送
+					gr.sendMsg2AllInThisRoom(msg2Send)
+					continue
+				}
+
 				if len(gr.message) != 0 {
 					operationMsg := &operation.GS2C_Operation{}
+					gr.frameMutex.Lock()
 					operationMsg.ServerFrame = gr.currentFrame
 					gr.currentFrame++
-					gr.msgMutex.RLock()
+					gr.frameMutex.Unlock()
+					gr.msgMutex.Lock()
 					//取出消息
 					for _, msg := range gr.message {
 						operationMsg.Operations = append(operationMsg.Operations, msg)
@@ -115,7 +149,7 @@ func (gr *GameRoom) roomGameServerStart() {
 					//清空message
 					gr.message = append([]*operation.C2GS_Operation{})
 
-					gr.msgMutex.RUnlock()
+					gr.msgMutex.Unlock()
 					//序列化
 					msg2Send, gameMarerr := proto.Marshal(operationMsg)
 					if gameMarerr != nil {
@@ -138,28 +172,32 @@ func (gr *GameRoom) roomGameServerStart() {
 func (gr *GameRoom) msgReceive(pplayer *Player) {
 
 	//接收消息
+	rcvErrCount := 0
 	for {
-		//noMsg := false
-		rcvErrCount := 0
+		var msglen int32 = 0
+
+		if pplayer.status == playerstatus.Deleted {
+			runtime.Goexit()
+		}
+
 		//读取消息长度
 		var msgLenByte []byte
 		var lenLenHaveRead int32 = 0
 		for {
 			tempBuf := make([]byte, 4-lenLenHaveRead)
 			lenByte, e := pplayer.conn.Read(tempBuf[0 : 4-lenLenHaveRead])
-			//如果未收到消息
-			if lenByte == 0 {
 
-			}
 			if e != nil {
 				if e == io.EOF {
-					//runtime.Goexit()
-					break
+					pplayer.conn.Close()
+					runtime.Goexit()
 				}
 				Slog.Log2file(e.Error())
 				fmt.Println("Receive Failed, err:", e)
 				rcvErrCount++
-				if rcvErrCount == 20 {
+				if rcvErrCount >= 20 {
+					pplayer.conn.Close()
+					rcvErrCount = 0
 					runtime.Goexit()
 				}
 			}
@@ -169,8 +207,13 @@ func (gr *GameRoom) msgReceive(pplayer *Player) {
 				break
 			}
 		}
-		msglen := BytesToInt(msgLenByte)
+		msglen = BytesToInt(msgLenByte)
 		//fmt.Println("消息长度：", msglen)
+		if msglen < 1 || msglen > 128 {
+			var flush []byte
+			pplayer.conn.Read(flush)
+			continue
+		}
 
 		var buf []byte
 		//已经读到的字节数
@@ -181,17 +224,13 @@ func (gr *GameRoom) msgReceive(pplayer *Player) {
 
 			if err != nil {
 				if err == io.EOF {
-					break
-					//runtime.Goexit()
+					pplayer.conn.Close()
+					runtime.Goexit()
 				}
 
 				Slog.Log2file(err.Error())
 				fmt.Println("Receive Failed, err:", err)
 				rcvErrCount++
-				if rcvErrCount == 20 {
-					pplayer.conn.Close()
-					runtime.Goexit()
-				}
 			}
 			buf = CombineBytes(buf, tempBuf)
 			protoLenHaveRead += int32(protoLen)
@@ -202,18 +241,22 @@ func (gr *GameRoom) msgReceive(pplayer *Player) {
 
 		//在游戏状态中时，若该客户端在一定时间内未接受到任何消息,则断开连接，关闭协程
 
-		if msglen < 1 {
-			//emptyCount++
+		if len(buf) < 1 || len(buf) > 128 {
 			continue
 		}
 
-		fmt.Println("房间内收到消息")
+		//fmt.Println("房间内收到消息")
 
 		msgType := buf[0]
 		msgContent := buf[1:msglen]
 
 		if msgType != messageType.C_OPERATION {
 			fmt.Println("收到的消息类型是：", msgType)
+		}
+
+		if msgType == messageType.C_APPCLOSE {
+			fmt.Println("客户端退出游戏")
+			gr.clientAppClose(msgContent, pplayer)
 		}
 
 		//////////////////////////////////////////////
@@ -224,36 +267,51 @@ func (gr *GameRoom) msgReceive(pplayer *Player) {
 			//退出房间
 			case messageType.C_ROOMQUIT:
 				fmt.Println("退出房间")
-				gr.quitRoom(msgContent)
+				gr.quitRoom(msgContent, pplayer)
 			//玩家准备
 			case messageType.C_PLAYERREADY:
 				fmt.Println("玩家准备")
-				gr.playerPrepare(msgContent)
+				gr.playerPrepare(msgContent, pplayer)
 			//进入选择
 			case messageType.C_STARTCHOOSE:
 				fmt.Println("进入选择")
-				gr.startSelect(msgContent)
+				gr.startSelect(msgContent, pplayer)
 			//英雄选择
 			case messageType.C_CHOOSELEGEND:
 				fmt.Println("英雄选择")
-				gr.roleSelect(msgContent)
-			case messageType.C_APPCLOSE:
-				fmt.Println("客户端退出游戏")
-				gr.clientAppClose(msgContent)
+				gr.roleSelect(msgContent, pplayer)
+			// case messageType.C_APPCLOSE:
+			// 	fmt.Println("客户端退出游戏")
+			// 	gr.clientAppClose(msgContent)
 			default:
 				var flush []byte
 				pplayer.conn.Read(flush)
 			}
 
 		} else { //游戏进行中消息收发逻辑
-			if msgType == messageType.C_PLAYERSTATUSSYNC {
+
+			switch msgType {
+			//客户端同步信息
+			case messageType.C_PLAYERSTATUSSYNC:
 				fmt.Println("客户端同步")
-				gr.playerStatusSync(msgContent)
+				gr.playerStatusSync(msgContent, pplayer)
 				continue
-			}
-
-			if msgType == messageType.C_OPERATION {
-
+			//补帧请求
+			case messageType.C_SUPPLEFRAME:
+				suppleFrameMsg := &operation.C2GS_SuppleFrame{}
+				umerr := proto.Unmarshal(msgContent, suppleFrameMsg)
+				if umerr != nil {
+					Slog.Log2filef("房间%d游戏内消息解析失败\n", gr.roomId)
+					Slog.Log2filef("错误详细信息：%s", umerr.Error())
+					var flush []byte
+					pplayer.conn.Read(flush)
+					continue
+				}
+				gr.emptyMutex.Lock()
+				gr.emptyMsg = append(gr.emptyMsg, suppleFrameMsg)
+				gr.emptyMutex.Unlock()
+			//游戏操作
+			case messageType.C_OPERATION:
 				//解析proto
 				operationMsgRcv := &operation.C2GS_Operation{}
 				umerr := proto.Unmarshal(msgContent, operationMsgRcv)
@@ -271,38 +329,35 @@ func (gr *GameRoom) msgReceive(pplayer *Player) {
 				gr.message = append(gr.message, operationMsgRcv)
 				gr.msgMutex.Unlock()
 
-				// //使用channel
-				// gr.messages <- operationMsgRcv
-			}
-
-			if msgType == messageType.C_GAMEEND {
+			case messageType.C_GAMEEND:
 				pplayer.roomId = 0
 				pplayer.status = playerstatus.NotInRoom
 				//通知
-				ComInterGorout <- notice.Notice{
-					NoticeType: notice.GameEnd,
-					RoomId:     gr.roomId,
-					PlayerId:   pplayer.playerId,
-				}
 				gr.msgCom <- InnerGameNotice{
 					noticeType: notice.GameEnd,
 					playerId:   pplayer.playerId,
 				}
 				go Process(pplayer.conn)
 				runtime.Goexit()
+
 			}
 		}
 	}
 }
 
-func (gr *GameRoom) quitRoom(msgContent []byte) {
+func (gr *GameRoom) quitRoom(msgContent []byte, pplayer *Player) {
 	gr.playersMutex.Lock()
 	defer gr.playersMutex.Unlock()
 	var player2Quit *Player
 	var quitRes bool = false
 
 	roomQuitMsgRcv := &roomMessage.C2GS_RoomQuit{}
-	proto.Unmarshal(msgContent, roomQuitMsgRcv)
+	ume := proto.Unmarshal(msgContent, roomQuitMsgRcv)
+	if ume != nil {
+		Slog.Log2filef("Quit Room Unmarshal Error:%s\n", ume.Error())
+		var flush []byte
+		pplayer.conn.Read(flush)
+	}
 
 	//fmt.Println(roomQuitMsgRcv.GetRoomId())
 	//fmt.Println(roomQuitMsgRcv.GetPlayerId())
@@ -338,23 +393,24 @@ func (gr *GameRoom) quitRoom(msgContent []byte) {
 		}
 	}
 
+	//要发送的proto
 	roomQuitMsg2Send := &roomMessage.GS2C_RoomQuit{}
 	roomQuitMsg2Send.PlayerId = roomQuitMsgRcv.GetPlayerId()
-	roomQuitMsg2Send.ResStatus = 100
-	if !quitRes {
-		roomQuitMsg2Send.ResStatus = 301
+	roomQuitMsg2Send.ResStatus = 301
+	if quitRes {
+		roomQuitMsg2Send.ResStatus = 100
 	}
 
 	msg2Send, err := proto.Marshal(roomQuitMsg2Send)
 	if err != nil {
 		fmt.Println("房间退出信息序列化失败")
-		os.Exit(-1)
 	}
 	msg2Send = TC_Combine(messageType.S_ROOMQUIT, msg2Send)
 	//如果退出成功向退出客户端发消息，再向所有房间内客户端发送消息
 	//如果退出失败只向退出客户端发消息
-	fmt.Println(*player2Quit)
-	sendMsg2One(player2Quit.conn, msg2Send)
+	if player2Quit != nil {
+		sendMsg2One(player2Quit.conn, msg2Send)
+	}
 
 	if quitRes {
 
@@ -375,12 +431,18 @@ func (gr *GameRoom) quitRoom(msgContent []byte) {
 		fmt.Println("协程退出")
 		runtime.Goexit()
 	}
+	//return ume
 }
 
-func (gr *GameRoom) playerPrepare(msgContent []byte) {
+func (gr *GameRoom) playerPrepare(msgContent []byte, pplayer *Player) {
 	var isReady bool = false
 	playerReadyMsgRcv := &roomMessage.C2GS_PlayerReady{}
-	proto.Unmarshal(msgContent, playerReadyMsgRcv)
+	ume := proto.Unmarshal(msgContent, playerReadyMsgRcv)
+	if ume != nil {
+		Slog.Log2filef("Prepare Unmarshal Error:%s\n", ume.Error())
+		var flush []byte
+		pplayer.conn.Read(flush)
+	}
 
 	//锁
 	gr.playersMutex.RLock()
@@ -410,11 +472,16 @@ func (gr *GameRoom) playerPrepare(msgContent []byte) {
 	//sendMsg2AllInRoom(msg2Send, gr.roomId)
 }
 
-func (gr *GameRoom) startSelect(msgContent []byte) {
+func (gr *GameRoom) startSelect(msgContent []byte, pplayer *Player) {
 	var ableStart bool = false
 	var monster *Player
 	startSelectMsgRcv := &roomMessage.C2GS_StartChoose{}
-	proto.Unmarshal(msgContent, startSelectMsgRcv)
+	ume := proto.Unmarshal(msgContent, startSelectMsgRcv)
+	if ume != nil {
+		Slog.Log2filef("Start Select Unmarshal Error:%s\n", ume.Error())
+		var flush []byte
+		pplayer.conn.Read(flush)
+	}
 
 	startSelectMsg2Send := &roomMessage.GS2C_StartChoose{}
 	//锁
@@ -458,11 +525,16 @@ func (gr *GameRoom) startSelect(msgContent []byte) {
 	//sendMsg2AllInRoom(msg2Send, gr.roomId)
 }
 
-func (gr *GameRoom) roleSelect(msgContent []byte) {
+func (gr *GameRoom) roleSelect(msgContent []byte, pplayer *Player) {
 	var player2SelectRole *Player
 	var isSelected bool = false
 	roleSelectMsgRecv := &roomMessage.C2GS_ChooseLegend{}
-	proto.Unmarshal(msgContent, roleSelectMsgRecv)
+	ume := proto.Unmarshal(msgContent, roleSelectMsgRecv)
+	if ume != nil {
+		Slog.Log2filef("Select Unmarshal Error:%s\n", ume.Error())
+		var flush []byte
+		pplayer.conn.Read(flush)
+	}
 
 	gr.roleMutex.Lock()
 	if roleSelectMsgRecv.GetRoomId() == gr.roomId {
@@ -507,9 +579,8 @@ func (gr *GameRoom) roleSelect(msgContent []byte) {
 			gr.sendMsg2AllInThisRoom(msg2Send3)
 			//sendMsg2AllInRoom(msg2Send, gr.roomId)
 			//通知，加锁
-			ComInterGorout <- notice.Notice{
-				NoticeType: notice.GameStart,
-				RoomId:     gr.roomId,
+			gr.msgCom <- InnerGameNotice{
+				noticeType: notice.GameStart,
 			}
 		}
 	}
@@ -521,29 +592,31 @@ func (gr *GameRoom) roleSelect(msgContent []byte) {
 ** 当房间中仅剩其一位玩家，将其信息清空，关闭连接，关闭该用户收发消息线程。利用消息通知room server，关闭roomserver线程，并移出该房间
 ** 当房间还有其它玩家时，仅仅对其操作
 **/
-func (gr *GameRoom) clientAppClose(msgContent []byte) {
+func (gr *GameRoom) clientAppClose(msgContent []byte, pplayer *Player) {
 	var isRoomDismiss bool = false
 	clientCloseMsgRcv := &appclose.C2GS_AppClose{}
-	proto.Unmarshal(msgContent, clientCloseMsgRcv)
+	ume := proto.Unmarshal(msgContent, clientCloseMsgRcv)
+	if ume != nil {
+		Slog.Log2filef("Client Close Unmarshal Error:%s\n", ume.Error())
+		var flush []byte
+		pplayer.conn.Read(flush)
+	}
 
 	//锁
+	var connDelPlayer Player
 	gr.playersMutex.RLock()
 	defer gr.playersMutex.RUnlock()
 	for i := 0; i < len(gr.players); i++ {
 		if gr.players[i].playerId == clientCloseMsgRcv.GetPlayerId() {
 			if len(gr.players) == 1 {
 				//通知房间主线程，关闭该房间线程
-				ComInterGorout <- notice.Notice{
-					NoticeType: notice.RoomDismiss,
-					RoomId:     gr.roomId,
-					PlayerId:   0,
-				}
 				gr.msgCom <- InnerGameNotice{
 					noticeType: notice.RoomDismiss,
 				}
 				isRoomDismiss = true
 			}
 			tplayer := gr.players[i]
+			connDelPlayer = *tplayer
 
 			//改变房间选人数据
 			//锁
@@ -553,8 +626,6 @@ func (gr *GameRoom) clientAppClose(msgContent []byte) {
 			//从房间中将其移除，加锁
 			gr.players = append(gr.players[:i], gr.players[i+1:]...)
 
-			//关闭其连接
-			tplayer.conn.Close()
 			//将其从playersArr中移出，加锁
 			PlayersArrMutex.Lock()
 			defer PlayersArrMutex.Unlock()
@@ -582,20 +653,23 @@ func (gr *GameRoom) clientAppClose(msgContent []byte) {
 		msg2Send = TC_Combine(messageType.S_ROOMQUIT, msg2Send)
 		gr.sendMsg2AllInThisRoom(msg2Send)
 	}
-	// fmt.Printf("目前还剩%d位玩家在线\n", len(playersArr))
-	// for i, p := range playersArr {
-	// 	fmt.Printf("第%d位用户\n:", i)
-	// 	fmt.Println("具体信息:", p)
-	// }
 
+	//关闭其连接
+	connDelPlayer.conn.Close()
 	runtime.Goexit()
 }
 
-func (gr *GameRoom) playerStatusSync(msgContent []byte) {
+func (gr *GameRoom) playerStatusSync(msgContent []byte, pplayer *Player) {
 	gr.playersMutex.RLock()
 	defer gr.playersMutex.RUnlock()
 	statusSyncMsgRcv := &roomMessage.C2GS_PlayerStatusSync{}
-	proto.Unmarshal(msgContent, statusSyncMsgRcv)
+	ume := proto.Unmarshal(msgContent, statusSyncMsgRcv)
+	if ume != nil {
+		Slog.Log2filef("Sync Unmarshal Error:%s\n", ume.Error())
+		var flush []byte
+		pplayer.conn.Read(flush)
+	}
+
 	var loadCompleted bool = false
 
 	if statusSyncMsgRcv.GetRoomId() == gr.roomId {
@@ -616,7 +690,7 @@ func (gr *GameRoom) playerStatusSync(msgContent []byte) {
 		if loadCompleted {
 			statusSyncMsg2Send := &roomMessage.GS2C_PlayerStatusSync{
 				ResStatus: 100,
-				Timestamp: time.Now().UnixNano() / 1e6,
+				Timestamp: int64(time.Now().Unix()),
 			}
 
 			//计时任务线程开启
@@ -636,15 +710,19 @@ func (gr *GameRoom) timerSeven() {
 	for {
 		<-gr.gameTimer.C
 		for {
-			sevenNoteMsg := &operation.GS2C_SevenNote{
-				RoomId: gr.roomId,
+			gr.frameMutex.Lock()
+			sevenNoteMsg := &operation.GS2C_Operation{
+				ServerFrame: gr.currentFrame,
+				SevenNote:   true,
 			}
+			gr.currentFrame++
+			gr.frameMutex.Unlock()
 			msgBytes, err := proto.Marshal(sevenNoteMsg)
 			if err != nil {
 				Slog.Log2filef("TimerSeven Proto Marshal Error : %s\n", err.Error())
 				continue
 			}
-			msgBytes = TC_Combine(messageType.S_SEVENNOTE, msgBytes)
+			msgBytes = TC_Combine(messageType.S_OPERATION, msgBytes)
 			gr.sendMsg2AllInThisRoom(msgBytes)
 			break
 		}
@@ -653,9 +731,14 @@ func (gr *GameRoom) timerSeven() {
 	gr.gameTimer.Stop()
 }
 
-func (gr *GameRoom) playerQuitGame(msgContent []byte) {
+func (gr *GameRoom) playerQuitGame(msgContent []byte, pplayer *Player) {
 	playerQuitGameMsgRcv := &operation.C2GS_PlayerQuit{}
-	proto.Unmarshal(msgContent, playerQuitGameMsgRcv)
+	ume := proto.Unmarshal(msgContent, playerQuitGameMsgRcv)
+	if ume != nil {
+		Slog.Log2filef("Player Quit Unmarshal Error:%s\n", ume.Error())
+		var flush []byte
+		pplayer.conn.Read(flush)
+	}
 
 	gr.playersMutex.Lock()
 	defer gr.playersMutex.Unlock()
@@ -679,7 +762,7 @@ func (gr *GameRoom) playerQuitGame(msgContent []byte) {
 将房间中每一个用户的房间ID以及状态改为未在房间中的状态
 且需将收发消息的
 */
-func (gr *GameRoom) gameCompleted(msgContent []byte) {
+func (gr *GameRoom) gameCompleted(msgContent []byte, pplayer *Player) {
 	// gameEndMsgRcv := &operation.C2GS_GameEnd{}
 	// proto.Unmarshal(gameEndMsgRcv, msgContent)
 	// rid := gameEndMsgRcv.RoomId

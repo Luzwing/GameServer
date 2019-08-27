@@ -12,4 +12,5 @@ const (
 	Locked
 	Loaded
 	Gaming
+	Deleted
 )

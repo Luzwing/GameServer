@@ -1,1 +1,1 @@
-Get-ChildItem roomMessage.proto |Resolve-Path -Relative | %{protoc $_ --go_out=.}
+Get-ChildItem gameEnter.proto |Resolve-Path -Relative | %{protoc $_ --go_out=.}

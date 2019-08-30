@@ -3,15 +3,20 @@ package mainFrame
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"goproto/operation"
+	"io"
 	"net"
 	"notice"
 	"playerstatus"
+	"runtime"
 	"serverlog"
 	"sync"
 	"time"
 )
+
+var joinTimeToSleep int = 80
 
 var conns []net.Conn
 
@@ -31,10 +36,13 @@ var Slog serverlog.ServerLog
 //noticeType:1-客户端加入
 //noticeType:2-游戏开始
 //noticeType:3-房间解散
-var ComInterGorout chan notice.Notice
+var ComInterGorout []notice.Notice
 var ComInterMutex sync.RWMutex
 
-const STANDARD_PLAYER_IN_ROOM = 3
+var RoomsAbleQuickJoin map[int]map[int32]byte
+var RoomsAbleQJMutex sync.RWMutex
+
+const STANDARD_PLAYER_IN_ROOM = 2
 
 //用户生成房间id
 var UniqueId int32
@@ -43,6 +51,10 @@ var idLock sync.Mutex
 //用户ID生成
 var PlayerId int32
 var playerIdLock sync.Mutex
+
+//
+var QuickJoinTime int
+var QJTimeMutex sync.RWMutex
 
 //代表
 
@@ -145,6 +157,73 @@ func GetAllPlayers() {
 	}
 }
 
+func readMsg(conn net.Conn, buf *[]byte, rcvErrCount *int) (int32, error) {
+	//读取消息长度
+	var msglen int32 = 0
+	var msgLenByte []byte
+	var lenLenHaveRead int32 = 0
+	for {
+		tempBuf := make([]byte, 4-lenLenHaveRead)
+		lenByte, e := conn.Read(tempBuf[0 : 4-lenLenHaveRead])
+
+		if e != nil {
+			if e == io.EOF {
+				conn.Close()
+				runtime.Goexit()
+			}
+			Slog.Log2file(e.Error())
+			fmt.Println("Receive Failed, err:", e)
+			*rcvErrCount++
+			if *rcvErrCount >= 20 {
+				conn.Close()
+				*rcvErrCount = 0
+				runtime.Goexit()
+			}
+		}
+		msgLenByte = CombineBytes(msgLenByte, tempBuf)
+		lenLenHaveRead += int32(lenByte)
+		if lenLenHaveRead == 4 {
+			break
+		}
+	}
+	msglen = BytesToInt(msgLenByte)
+	//fmt.Println("消息长度：", msglen)
+	if msglen < 1 || msglen > 128 {
+		var flush []byte
+		conn.Read(flush)
+		return -1, errors.New("Read Error,message length error")
+	}
+
+	//已经读到的字节数
+	var protoLenHaveRead int32 = 0
+	for {
+		tempBuf := make([]byte, msglen-protoLenHaveRead)
+		protoLen, err := conn.Read(tempBuf[0 : msglen-protoLenHaveRead])
+
+		if err != nil {
+			if err == io.EOF {
+				conn.Close()
+				runtime.Goexit()
+			}
+
+			Slog.Log2file(err.Error())
+			fmt.Println("Receive Failed, err:", err)
+			*rcvErrCount++
+		}
+		*buf = CombineBytes(*buf, tempBuf)
+		protoLenHaveRead += int32(protoLen)
+		if protoLenHaveRead == msglen {
+			break
+		}
+	}
+	//在游戏状态中时，若该客户端在一定时间内未接受到任何消息,则断开连接，关闭协程
+	if len(*buf) < 1 || len(*buf) > 128 {
+		return -1, errors.New("Read Error,buffer exception")
+	}
+
+	return msglen, nil
+}
+
 func DeleteRoomById(rid int32) {
 	RoomsMutex.Lock()
 	PlayersArrMutex.Lock()
@@ -164,11 +243,13 @@ func DeleteRoomById(rid int32) {
 				}
 			}
 			room.playersMutex.Unlock()
-			ComInterGorout <- notice.Notice{
+			ComInterMutex.Lock()
+			ComInterGorout = append(ComInterGorout, notice.Notice{
 				NoticeType: notice.RoomDismiss,
 				RoomId:     rid,
 				PlayerId:   0,
-			}
+			})
+			ComInterMutex.Unlock()
 		}
 	}
 

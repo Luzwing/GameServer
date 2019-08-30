@@ -5,11 +5,11 @@ import (
 	"goproto/appclose"
 	"goproto/operation"
 	"goproto/roomMessage"
-	"io"
 	"math/rand"
 	"messageType"
 	"notice"
 	"playerstatus"
+	"reflect"
 	"runtime"
 	"time"
 
@@ -27,53 +27,10 @@ func (gr *GameRoom) roomGameServerStart() {
 	//如果没在游戏中
 	for {
 		if !gr.isGameInProgress {
+			msgIndex := 0
 		BEGIN:
 			for {
 				select {
-				case noticeMsg := <-ComInterGorout:
-					fmt.Println(noticeMsg.PlayerId, noticeMsg.RoomId, noticeMsg.NoticeType)
-					//若有玩家试图加入，如果该线程处于活跃状态则可以加入
-					if noticeMsg.NoticeType == notice.ClientWillJoin {
-						fmt.Println("有玩家试图加入", noticeMsg.PlayerId, noticeMsg.RoomId, noticeMsg.NoticeType)
-						//若有玩家加入本房间，则为其开创新协程
-						if noticeMsg.RoomId == gr.roomId {
-							if noticeMsg.IsAbleJoin != nil {
-								//if reflect.ValueOf(*noticeMsg.IsAbleJoin).IsValid() {
-								(*noticeMsg.IsAbleJoin) = true
-								//}
-							}
-						}
-					}
-					//如果有玩家加入某一个房间
-					if noticeMsg.NoticeType == notice.ClientJoin {
-						fmt.Println("有玩家加入", noticeMsg.PlayerId, noticeMsg.RoomId, noticeMsg.NoticeType)
-						//若有玩家加入本房间，则为其开创新协程
-						if noticeMsg.RoomId == gr.roomId {
-							for i := 0; i < len(gr.players); i++ {
-								if noticeMsg.PlayerId == gr.players[i].playerId {
-									fmt.Println("为新玩家开创线程")
-									go gr.msgReceive(gr.players[i])
-									break
-								}
-							}
-							fmt.Println("房间内玩家人数：", len(gr.players))
-						}
-					}
-
-					if noticeMsg.NoticeType == notice.RoomDismiss {
-						if noticeMsg.RoomId == gr.roomId {
-							RoomsMutex.Lock()
-							defer RoomsMutex.Unlock()
-							for i := 0; i < len(rooms); i++ {
-								if rooms[i].roomId == gr.roomId {
-									rooms = append(rooms[:i], rooms[i+1:]...)
-									break
-								}
-							}
-							fmt.Println("房间数：", len(rooms))
-							runtime.Goexit()
-						}
-					}
 				case innerGameMsg := <-gr.msgCom:
 					//游戏开始
 					if innerGameMsg.noticeType == notice.GameStart {
@@ -92,49 +49,83 @@ func (gr *GameRoom) roomGameServerStart() {
 						fmt.Println("房间数：", len(rooms))
 						runtime.Goexit()
 					}
-					//游戏结束
-					if innerGameMsg.noticeType == notice.GameEnd {
-						gameEnded := false
-						for _, player := range gr.players {
-							if player.status != playerstatus.NotInRoom {
-								break
-							}
-							gameEnded = true
-						}
-
-						if gameEnded {
-							RoomsMutex.Lock()
-							defer RoomsMutex.Unlock()
-							for i := 0; i < len(rooms); i++ {
-								if rooms[i].roomId == gr.roomId {
-									rooms = append(rooms[:i], rooms[i+1:]...)
-									break
+				default:
+					if len(ComInterGorout) > msgIndex {
+						noticeMsg := ComInterGorout[msgIndex]
+						msgIndex++
+						fmt.Println(noticeMsg.PlayerId, noticeMsg.RoomId, noticeMsg.NoticeType)
+						//若有玩家试图加入，如果该线程处于活跃状态则可以加入
+						if noticeMsg.NoticeType == notice.ClientWillJoin {
+							fmt.Println("有玩家试图加入", noticeMsg.PlayerId, noticeMsg.RoomId, noticeMsg.NoticeType)
+							//若有玩家加入本房间，则为其开创新协程
+							if noticeMsg.RoomId == gr.roomId {
+								if noticeMsg.IsAbleJoin != nil {
+									if reflect.ValueOf(*noticeMsg.IsAbleJoin).IsValid() {
+										(*noticeMsg.IsAbleJoin) = true
+									}
 								}
 							}
-							runtime.Goexit()
+						}
+						if noticeMsg.NoticeType == notice.ClientQuickJoin {
+							fmt.Println("有玩家试图加入", noticeMsg.PlayerId, noticeMsg.RoomId, noticeMsg.NoticeType)
+							//若有玩家加入本房间，则为其开创新协程
+							if noticeMsg.RoomId == gr.roomId {
+								RoomsAbleQJMutex.RLock()
+								gr.playersMutex.RLock()
+								qjTime := noticeMsg.JoinTime
+								RoomsAbleQuickJoin[qjTime] = make(map[int32]byte)
+								RoomsAbleQuickJoin[qjTime][gr.roomId] = byte(len(gr.players))
+								gr.playersMutex.RUnlock()
+								RoomsAbleQJMutex.RUnlock()
+							}
+						}
+						//如果有玩家加入某一个房间
+						if noticeMsg.NoticeType == notice.ClientJoin {
+							fmt.Println("有玩家加入", noticeMsg.PlayerId, noticeMsg.RoomId, noticeMsg.NoticeType)
+							//若有玩家加入本房间，则为其开创新协程
+							if noticeMsg.RoomId == gr.roomId {
+								gr.playersMutex.RLock()
+								for i := 0; i < len(gr.players); i++ {
+									if noticeMsg.PlayerId == gr.players[i].playerId {
+										fmt.Println("为新玩家开创线程")
+										go gr.msgReceive(gr.players[i])
+										break
+									}
+								}
+								fmt.Println("房间内玩家人数：", len(gr.players))
+								gr.playersMutex.RUnlock()
+							}
+						}
+
+						if noticeMsg.NoticeType == notice.RoomDismiss {
+							if noticeMsg.RoomId == gr.roomId {
+								RoomsMutex.Lock()
+								defer RoomsMutex.Unlock()
+								for i := 0; i < len(rooms); i++ {
+									if rooms[i].roomId == gr.roomId {
+										rooms = append(rooms[:i], rooms[i+1:]...)
+										break
+									}
+								}
+								fmt.Println("房间数：", len(rooms))
+								runtime.Goexit()
+							}
 						}
 					}
-
-				default:
-					continue
 				}
 			}
 		} else { //游戏进行中逻辑
 			fmt.Println("开始发游戏消息")
-			ticker := time.NewTicker(time.Millisecond * 50)
-			//frameToSuppleNum := 0
+			noMsgCount := 0
+			ticker := time.NewTicker(time.Millisecond * 40)
 			//initialRcv := false
 			for {
 				<-ticker.C
-				//从消息队列中取出消息，发给客户端,加锁
-				// if gr.supplingFrame {
-				// 	if frameToSuppleNum < 3 {
-				// 		frameToSuppleNum++
-				// 		continue
-				// 	}
-				// 	frameToSuppleNum = 0
-				// 	gr.supplingFrame = false
-				// }
+				if len(gr.players) == 0 {
+					fmt.Printf("Room %d Game Over\n", gr.roomId)
+					runtime.Goexit()
+				}
+
 				if len(gr.emptyMsg) != 0 {
 					gr.emptyMutex.Lock()
 					suppleFrameMsgSnd := &operation.GS2C_SuppleFrame{}
@@ -150,6 +141,7 @@ func (gr *GameRoom) roomGameServerStart() {
 					msg2Send = TC_Combine(messageType.S_SUPPLEFRAME, msg2Send)
 					//发送
 					gr.sendMsg2AllInThisRoom(msg2Send)
+					noMsgCount = 0
 				}
 				// if len(gr.message) != 0 {
 				// 	initialRcv = true
@@ -181,8 +173,25 @@ func (gr *GameRoom) roomGameServerStart() {
 					gr.sendMsg2AllInThisRoom(msg2Send)
 
 					//operationSend := false
+					noMsgCount = 0
+					continue
 				}
-
+				noMsgCount++
+				//fmt.Println("nomasgcount:", noMsgCount)
+				if noMsgCount == 500 {
+					// fmt.Println("房间进程退出")
+					// for _, player := range gr.players {
+					// 	player.conn.Close()
+					// }
+					// RoomsMutex.Lock()
+					// defer RoomsMutex.Unlock()
+					// for ri, room := range rooms {
+					// 	if room.roomId == gr.roomId {
+					// 		rooms = append(rooms[:ri], rooms[ri+1:]...)
+					// 	}
+					// }
+					// runtime.Goexit()
+				}
 			}
 			ticker.Stop()
 		}
@@ -195,77 +204,14 @@ func (gr *GameRoom) msgReceive(pplayer *Player) {
 	//接收消息
 	rcvErrCount := 0
 	for {
-		var msglen int32 = 0
-
 		if pplayer.status == playerstatus.Deleted {
 			runtime.Goexit()
 		}
-
-		//读取消息长度
-		var msgLenByte []byte
-		var lenLenHaveRead int32 = 0
-		for {
-			tempBuf := make([]byte, 4-lenLenHaveRead)
-			lenByte, e := pplayer.conn.Read(tempBuf[0 : 4-lenLenHaveRead])
-
-			if e != nil {
-				if e == io.EOF {
-					pplayer.conn.Close()
-					runtime.Goexit()
-				}
-				Slog.Log2file(e.Error())
-				fmt.Println("Receive Failed, err:", e)
-				rcvErrCount++
-				if rcvErrCount >= 20 {
-					pplayer.conn.Close()
-					rcvErrCount = 0
-					runtime.Goexit()
-				}
-			}
-			msgLenByte = CombineBytes(msgLenByte, tempBuf)
-			lenLenHaveRead += int32(lenByte)
-			if lenLenHaveRead == 4 {
-				break
-			}
-		}
-		msglen = BytesToInt(msgLenByte)
-		//fmt.Println("消息长度：", msglen)
-		if msglen < 1 || msglen > 128 {
-			var flush []byte
-			pplayer.conn.Read(flush)
-			continue
-		}
-
 		var buf []byte
-		//已经读到的字节数
-		var protoLenHaveRead int32 = 0
-		for {
-			tempBuf := make([]byte, msglen-protoLenHaveRead)
-			protoLen, err := pplayer.conn.Read(tempBuf[0 : msglen-protoLenHaveRead])
-
-			if err != nil {
-				if err == io.EOF {
-					pplayer.conn.Close()
-					runtime.Goexit()
-				}
-
-				Slog.Log2file(err.Error())
-				fmt.Println("Receive Failed, err:", err)
-				rcvErrCount++
-			}
-			buf = CombineBytes(buf, tempBuf)
-			protoLenHaveRead += int32(protoLen)
-			if protoLenHaveRead == msglen {
-				break
-			}
-		}
-
-		//在游戏状态中时，若该客户端在一定时间内未接受到任何消息,则断开连接，关闭协程
-
-		if len(buf) < 1 || len(buf) > 128 {
+		msglen, re := readMsg(pplayer.conn, &buf, &rcvErrCount)
+		if re != nil || msglen == -1 {
 			continue
 		}
-
 		//fmt.Println("房间内收到消息")
 
 		msgType := buf[0]
@@ -440,10 +386,6 @@ func (gr *GameRoom) quitRoom(msgContent []byte, pplayer *Player) {
 
 		//
 		if len(gr.players) == 0 {
-			// ComInterGorout <- notice.Notice{
-			// 	NoticeType: notice.RoomDismiss,
-			// 	RoomId:     gr.roomId,
-			// }
 			gr.msgCom <- InnerGameNotice{
 				noticeType: notice.RoomDismiss,
 			}
@@ -630,6 +572,7 @@ func (gr *GameRoom) clientAppClose(msgContent []byte, pplayer *Player) {
 	var connDelPlayer Player
 	gr.playersMutex.RLock()
 	defer gr.playersMutex.RUnlock()
+	//i是房间内的
 	for i := 0; i < len(gr.players); i++ {
 		if gr.players[i].playerId == clientCloseMsgRcv.GetPlayerId() {
 			if len(gr.players) == 1 {
@@ -655,7 +598,7 @@ func (gr *GameRoom) clientAppClose(msgContent []byte, pplayer *Player) {
 			defer PlayersArrMutex.Unlock()
 			for j := 0; j < len(playersArr); j++ {
 				if playersArr[j].playerId == tplayer.playerId {
-					playersArr = append(playersArr[:i], playersArr[i+1:]...)
+					playersArr = append(playersArr[:j], playersArr[j+1:]...)
 					break
 				}
 			}
@@ -780,6 +723,7 @@ func (gr *GameRoom) playerQuitGame(msgContent []byte, pplayer *Player) {
 				go Process(player.conn)
 				runtime.Goexit()
 			}
+
 		}
 	}
 }

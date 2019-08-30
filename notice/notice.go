@@ -8,9 +8,11 @@ const (
 	_ byte = iota
 	ClientWillJoin
 	ClientJoin
+	ClientQuickJoin
 	GameStart
 	RoomDismiss
 	GameEnd
+	RoomActive
 )
 
 //noticeType:1-客户端加入
@@ -21,6 +23,11 @@ type Notice struct {
 	RoomId     int32
 	PlayerId   int32
 	IsAbleJoin *bool
+	JoinTime   int
+}
+
+type QuickJoinReply struct {
+	RoomsAbleJoin []int32
 }
 
 func TimeOut(duration time.Duration, ch chan int) {

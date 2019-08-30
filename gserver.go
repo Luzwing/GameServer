@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"mainFrame"
 	"net"
-	"notice"
 	"os"
 	"runtime"
 )
@@ -25,12 +24,16 @@ func main() {
 	}
 	defer mainFrame.Slog.Close()
 
-	//初始化管道
-	mainFrame.ComInterGorout = make(chan notice.Notice, 1)
+	// //初始化管道
+	// mainFrame.ComInterGorout = make(chan notice.Notice, 1)
 
 	//
 	mainFrame.UniqueId = 1000
 	mainFrame.PlayerId = 123456
+	mainFrame.QuickJoinTime = 0
+
+	//
+	mainFrame.RoomsAbleQuickJoin = make(map[int]map[int32]byte)
 
 	//监听端口号
 	listen, err := net.Listen("tcp", ":5050")

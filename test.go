@@ -53,23 +53,29 @@ type sss struct {
 
 var tb []*int
 
+func tte() *int {
+	i := 1
+	return &i
+}
+
+func huh() {
+	for i := 0; i < 10; i++ {
+		j := i
+		tb = append(tb, &j)
+	}
+}
+
+func change(t *[]int) {
+	*t = append(*t, 1234)
+}
+
 func main() {
-	var test *int
-	fmt.Println(test)
-	fmt.Println(test == nil)
-	fmt.Println(time.Now().UnixNano() / 1e6)
-	b := make([]*int, 10)
-	for iiii := 0; iiii < 10; iiii++ {
-		hh := iiii
-		b[iiii] = &hh
+	var tttt []int
+	for i := 0; i < 10; i++ {
+		tttt = append(tttt, i)
 	}
-	a := &b[3]
-	for iiii := 0; iiii < 10; iiii++ {
-		fmt.Println(*b[iiii])
-	}
-	b = append(b[:1], b[2:]...)
-	fmt.Println(b)
-	fmt.Println(*a)
+	change(&tttt)
+	fmt.Println(tttt)
 }
 
 func a() {
